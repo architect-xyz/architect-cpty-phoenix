@@ -1,0 +1,39 @@
+[package]
+edition = "2021"
+name = "architect-cpty-phoenix"
+version = "0.1.0"
+
+[dependencies]
+anyhow = "1"
+api = { package = "architect-api", path = "../demon/api", features = ["clap"] }
+bytemuck = "1"
+bytes = "1"
+chrono = "0.4"
+clap = "4"
+ellipsis-client = { version = "1.0.0" }
+env_logger = "0.11"
+futures = "0.3"
+futures-util = "0.3"
+fxhash = "0.2.1"
+generic-token-faucet = "0.1.2"
+governor = "0.6.3"
+log = { version = "0.4", features = [] }
+nonzero_ext = "0.3.0"
+num-traits = "0.2"
+phoenix-common = { version = "0.2.1", features = ["no-entrypoint"] }
+phoenix-sdk = "0.7.0"
+phoenix-sdk-core = "0.7.0"
+phoenix-seat-manager-common = { version = "0.1.1", features = ["no-entrypoint"] }
+rand = "0.8"
+rust_decimal = "1"
+rust_decimal_macros = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_with = "3"
+shellexpand = "3"
+spl-token = { version = "3.5.0", features = ["no-entrypoint"] }
+solana-account-decoder = ">=1.14.12, <1.18"
+solana-client = ">=1.14.12, <1.18"
+solana-sdk = ">=1.14.12, <1.18"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.23"
