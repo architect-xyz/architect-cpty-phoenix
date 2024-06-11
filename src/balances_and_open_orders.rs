@@ -26,6 +26,23 @@ pub async fn poll_balances_and_open_orders(
     let mut tokens = FxHashSet::default();
     let mut balances: HashMap<String, Decimal> = HashMap::new();
     for (_, mi) in &ctx.market_info {
+        // poll the prio fee while we're here
+        rpc_limiter.until_ready().await;
+        let mut recent_fees = vec![];
+        let rpfs = sdk_client.client.get_recent_prioritization_fees(&[mi.pubkey]).await?;
+        for rpf in &rpfs {
+            if rpf.prioritization_fee != 0 {
+                recent_fees.push(rpf.prioritization_fee);
+            }
+        }
+        let median_fee = if recent_fees.is_empty() {
+            0u64
+        } else {
+            recent_fees.sort();
+            recent_fees[recent_fees.len() / 2]
+        };
+        debug!("median prioritization fee for {}: {}", mi.pubkey, median_fee);
+        mi.prioritization_fee.store(median_fee, Ordering::Relaxed);
         tokens.insert(mi.base.clone());
         tokens.insert(mi.quote.clone());
         rpc_limiter.until_ready().await;

@@ -1,9 +1,13 @@
 use phoenix_sdk_core::sdk_client_core::MarketMetadata;
 use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
+use solana_sdk::signature::Signature;
 use std::{
     collections::HashMap,
-    sync::{atomic::AtomicBool, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicU64},
+        Arc, Mutex,
+    },
 };
 
 pub mod balances_and_open_orders;
@@ -20,6 +24,8 @@ pub struct ConnectionCtx {
 #[derive(Debug)]
 pub struct MarketInfo {
     pub pubkey: Pubkey,
+    // last recommended priorization fee for this market in micro_lamports
+    pub prioritization_fee: Arc<AtomicU64>,
     pub metadata: MarketMetadata,
     pub base: TokenInfo,
     pub quote: TokenInfo,

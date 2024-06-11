@@ -17,7 +17,7 @@ use governor::{
     state::{InMemoryState, NotKeyed},
     Quota, RateLimiter,
 };
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
 use num_traits::{cast::ToPrimitive, FromPrimitive};
 use phoenix::state::{markets::FIFOOrderId, SelfTradeBehavior, Side};
 use phoenix_sdk::{
@@ -45,7 +45,7 @@ use std::{
     num::NonZeroU32,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
 };
@@ -93,13 +93,12 @@ async fn main() -> Result<()> {
         config.markets.iter().map(|m| m.parse()).collect::<Result<Vec<Pubkey>, _>>()?;
     let payer = utils::get_payer_keypair();
     env_logger::init();
-    let client = EllipsisClient::from_rpc(
-        RpcClient::new_with_commitment(
-            config.rpc_url.to_string(),
-            CommitmentConfig::confirmed(),
-        ),
-        &payer,
-    )?;
+    let solana_rpc_client = RpcClient::new_with_commitment(
+        config.rpc_url.to_string(),
+        CommitmentConfig::confirmed(),
+    );
+    let client = EllipsisClient::from_rpc(solana_rpc_client, &payer)?;
+    // let sdk_client = SDKClient::new_from_ellipsis_client(client).await?;
     let sdk_client = SDKClient::new_from_ellipsis_client_with_all_markets(client).await?;
     match args.cmd {
         Command::DevnetAirdrop => devnet_airdrop(sdk_client, payer, &markets[0]).await?,
@@ -176,6 +175,7 @@ async fn run(
             market_name,
             MarketInfo {
                 pubkey: *market,
+                prioritization_fee: Arc::new(AtomicU64::new(0)),
                 metadata,
                 base,
                 quote,
@@ -392,7 +392,7 @@ async fn handle_message(
                                 side,
                                 price_as_float: f_price,
                                 size_in_base_units: f_size,
-                                client_order_id: 0,
+                                client_order_id: client_oid,
                                 reject_post_only: true,
                                 use_only_deposited_funds: false,
                                 last_valid_slot: None,
@@ -410,7 +410,7 @@ async fn handle_message(
                                 size_in_base_units: f_size,
                                 self_trade_behavior: SelfTradeBehavior::CancelProvide,
                                 match_limit: None,
-                                client_order_id: 0,
+                                client_order_id: client_oid,
                                 use_only_deposited_funds: false,
                                 last_valid_slot: None,
                                 last_valid_unix_timestamp_in_seconds: None,
@@ -430,8 +430,14 @@ async fn handle_message(
                 ixs.extend(ix);
             }
             ixs.push(ix);
-            let sig = sdk_client.client.sign_send_instructions(ixs, vec![]).await?;
-            debug!("ixs submitted: {:?}", sig);
+            let prio_fee = market_info.prioritization_fee.load(Ordering::Relaxed);
+            let sig = utils::sign_send_instructions_with_prioritization_fee(
+                sdk_client,
+                ixs,
+                (prio_fee * 110) / 100,
+            )
+            .await?;
+            debug!("txn submitted: {:?}", sig);
             {
                 let mut open_cl_oids = ctx.open_cl_oids.lock().unwrap();
                 open_cl_oids.insert(client_oid, None);
@@ -443,7 +449,7 @@ async fn handle_message(
                 let ctx_open_cl_oids = ctx.open_cl_oids.lock().unwrap();
                 ctx_open_cl_oids.iter().find_map(|(cl_oid, osn)| {
                     let aoid =
-                        OrderId::new_unchecked((*cl_oid | 0xFFFF_FFFF_FFFF_FFFF) as u64);
+                        OrderId::new_unchecked((*cl_oid & 0xFFFF_FFFF_FFFF_FFFF) as u64);
                     if aoid == c.order_id {
                         Some((*cl_oid, *osn))
                     } else {
@@ -456,19 +462,22 @@ async fn handle_message(
                 for (_, market_info) in &ctx.market_info {
                     let oo = market_info.open_oids.lock().unwrap();
                     if let Some((_, pit)) = oo.get(&osn) {
-                        res = Some((market_info.pubkey, *pit));
+                        res = Some((market_info, *pit));
                         break;
                     }
                 }
-                if let Some((market_key, pit)) = res {
+                if let Some((market_info, pit)) = res {
                     let ix = sdk_client.get_cancel_ids_ix(
-                        &market_key,
+                        &market_info.pubkey,
                         vec![FIFOOrderId::new_from_untyped(pit, osn)],
                     )?;
-                    let sig = sdk_client
-                        .client
-                        .sign_send_instructions(vec![ix], vec![])
-                        .await?;
+                    let prio_fee = market_info.prioritization_fee.load(Ordering::Relaxed);
+                    let sig = utils::sign_send_instructions_with_prioritization_fee(
+                        sdk_client,
+                        vec![ix],
+                        (prio_fee * 110) / 100,
+                    )
+                    .await?;
                     debug!("ixs submitted: {:?}", sig);
                 } else {
                     error!(
@@ -535,6 +544,7 @@ async fn poll_transactions_task(
     let mut min_interval = tokio::time::interval(std::time::Duration::from_secs(1));
     min_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
+        trace!("polling transactions until {until:?}");
         if let Some(next_until) = poll_transactions(
             &sdk_client,
             &rpc_limiter,
@@ -645,6 +655,7 @@ async fn poll_transactions(
         }
         for txn in &filtered {
             let sig: Signature = txn.signature.parse()?;
+            trace!("parsing signature: {:?}", sig);
             rpc_limiter.until_ready().await;
             if let Some(events) = sdk_client.parse_events_from_transaction(&sig).await {
                 for event in &events {
@@ -656,7 +667,7 @@ async fn poll_transactions(
                                     oo.get(&f.order_sequence_number)
                                 {
                                     let oid = OrderId::new_unchecked(
-                                        (*cl_oid | 0xFFFF_FFFF_FFFF_FFFF) as u64,
+                                        (*cl_oid & 0xFFFF_FFFF_FFFF_FFFF) as u64,
                                     );
                                     let mut fill_discriminator = BytesMut::new();
                                     fill_discriminator.put_u64(oid.to_u64());
@@ -721,23 +732,29 @@ async fn poll_transactions(
                             let mut ocos = ctx.open_cl_oids.lock().unwrap();
                             if let Some(osn) = ocos.get_mut(&p.client_order_id) {
                                 *osn = Some(p.order_sequence_number);
-                                info!(
-                                    "architect order {} acked with osn #{}",
-                                    p.client_order_id, p.order_sequence_number
-                                );
                                 let mut oo = market_info.open_oids.lock().unwrap();
                                 oo.insert(
                                     p.order_sequence_number,
                                     (p.client_order_id, p.price_in_ticks),
                                 );
                                 let oid = OrderId::new_unchecked(
-                                    (p.client_order_id | 0xFFFF_FFFF_FFFF_FFFF) as u64,
+                                    (p.client_order_id & 0xFFFF_FFFF_FFFF_FFFF) as u64,
+                                );
+                                info!(
+                                    "architect order {} acked with osn #{}",
+                                    oid, p.order_sequence_number
                                 );
                                 bcast_tx
                                     .send(ExternalCptyProtocol::Ack(Ack {
                                         order_id: oid,
                                     }))
                                     .map_err(|_| anyhow!("broadcast closed"))?;
+                            } else if p.maker == trader {
+                                debug!("trader placed: {p:?}");
+                                warn!(
+                                    "trader order {} acked but not known to Architect",
+                                    p.client_order_id
+                                );
                             }
                         }
                         MarketEventDetails::Evict(e) => {
@@ -749,7 +766,7 @@ async fn poll_transactions(
                                 ocos.remove(&cl_oid);
                                 oo.remove(&e.order_sequence_number);
                                 let oid = OrderId::new_unchecked(
-                                    (cl_oid | 0xFFFF_FFFF_FFFF_FFFF) as u64,
+                                    (cl_oid & 0xFFFF_FFFF_FFFF_FFFF) as u64,
                                 );
                                 info!("architect order {} evicted out", oid);
                                 bcast_tx
@@ -759,7 +776,27 @@ async fn poll_transactions(
                                     .map_err(|_| anyhow!("broadcast closed"))?;
                             }
                         }
-                        MarketEventDetails::Reduce(..) => {}
+                        MarketEventDetails::Reduce(r) => {
+                            let mut oo = market_info.open_oids.lock().unwrap();
+                            if let Some((cl_oid, _)) =
+                                oo.get(&r.order_sequence_number).cloned()
+                            {
+                                if r.base_lots_remaining == 0 || r.is_full_cancel {
+                                    let mut ocos = ctx.open_cl_oids.lock().unwrap();
+                                    ocos.remove(&cl_oid);
+                                    oo.remove(&r.order_sequence_number);
+                                    let oid = OrderId::new_unchecked(
+                                        (cl_oid & 0xFFFF_FFFF_FFFF_FFFF) as u64,
+                                    );
+                                    info!("architect order {} reduced out", oid);
+                                    bcast_tx
+                                        .send(ExternalCptyProtocol::Out(Out {
+                                            order_id: oid,
+                                        }))
+                                        .map_err(|_| anyhow!("broadcast closed"))?;
+                                }
+                            }
+                        }
                         MarketEventDetails::FillSummary(..) => {}
                         MarketEventDetails::Fee(..) => {}
                         MarketEventDetails::TimeInForce(..) => {}

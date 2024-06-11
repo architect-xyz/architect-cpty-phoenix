@@ -1,13 +1,18 @@
-use anyhow::anyhow;
-use log::info;
+use anyhow::{anyhow, bail, Result};
+use log::{error, info};
 use phoenix_sdk::sdk_client::SDKClient;
 use phoenix_sdk_core::ata_utils::{
     create_associated_token_account, get_associated_token_address,
 };
-use solana_sdk::signature::{read_keypair_file, Keypair};
 use solana_sdk::{
-    account::Account, instruction::Instruction, program_pack::Pack, pubkey::Pubkey,
+    account::Account,
+    compute_budget::ComputeBudgetInstruction,
+    instruction::Instruction,
+    program_pack::Pack,
+    pubkey::Pubkey,
+    signature::{read_keypair_file, Keypair, Signature},
     signer::Signer,
+    transaction::Transaction,
 };
 use spl_token::state::Mint;
 
@@ -20,6 +25,33 @@ pub fn get_payer_keypair() -> solana_sdk::signer::keypair::Keypair {
             .map_err(|e| anyhow!(e.to_string()))
             .unwrap(),
     }
+}
+
+pub async fn sign_send_instructions_with_prioritization_fee(
+    sdk_client: &SDKClient,
+    instructions: Vec<Instruction>,
+    prioritization_fee: u64,
+) -> Result<Signature> {
+    let mut ixs = vec![];
+    let recent_blockhash = sdk_client.client.get_latest_blockhash().await?;
+    let txn = Transaction::new_signed_with_payer(
+        &instructions,
+        Some(&sdk_client.client.payer.pubkey()),
+        &[&sdk_client.client.payer],
+        recent_blockhash,
+    );
+    let res = sdk_client.client.simulate_transaction(&txn).await?;
+    if let Some(err) = res.value.err {
+        error!("simulating transaction: {err:?}");
+        bail!("simulating transaction: {err:?}");
+    }
+    let cu = res.value.units_consumed.ok_or_else(|| anyhow!("simulation error"))? as u32;
+    ixs.push(ComputeBudgetInstruction::set_compute_unit_limit(cu + (cu / 10)));
+    ixs.push(ComputeBudgetInstruction::set_compute_unit_price(prioritization_fee));
+    ixs.extend(instructions);
+    let sig = sdk_client.client.sign_send_instructions(ixs, vec![]).await?;
+    // TODO: figure out how to catch a txfail or drop (probably wait 3s)
+    Ok(sig)
 }
 
 pub async fn create_airdrop_spl_ixs(
