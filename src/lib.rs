@@ -1,7 +1,6 @@
 use phoenix_sdk_core::sdk_client_core::MarketMetadata;
 use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signature::Signature;
 use std::{
     collections::HashMap,
     sync::{
