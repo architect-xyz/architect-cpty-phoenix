@@ -74,6 +74,7 @@ enum Command {
 struct Config {
     rpc_url: String,
     rpc_rate_limit_per_sec: NonZeroU32,
+    prioritization_fee_percentile: f64,
     venue: String,
     markets: Vec<String>,
     tokens: BTreeMap<String, TokenConfig>,
@@ -196,6 +197,7 @@ async fn run(
         &rpc_limiter,
         &ctx,
         trader,
+        config.prioritization_fee_percentile,
     )
     .await?;
     {
@@ -209,6 +211,7 @@ async fn run(
                     rpc_limiter.clone(),
                     &ctx,
                     trader,
+                    config.prioritization_fee_percentile,
                 )
                 .await
                 {
@@ -507,6 +510,7 @@ async fn poll_balances_and_open_orders_task(
     rpc_limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
     ctx: &ConnectionCtx,
     trader: Pubkey,
+    prioritization_fee_percentile: f64,
 ) -> Result<()> {
     let mut min_interval = tokio::time::interval(std::time::Duration::from_secs(3));
     min_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -516,6 +520,7 @@ async fn poll_balances_and_open_orders_task(
             &rpc_limiter,
             ctx,
             trader,
+            prioritization_fee_percentile,
         )
         .await
         {

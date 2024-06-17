@@ -6,7 +6,8 @@ use governor::{
     state::{InMemoryState, NotKeyed},
     RateLimiter,
 };
-use log::{debug, warn};
+use hdrhistogram::Histogram;
+use log::{debug, error, warn};
 use phoenix::quantities::WrapperU64;
 use phoenix_sdk::sdk_client::SDKClient;
 use rust_decimal::Decimal;
@@ -22,24 +23,26 @@ pub async fn poll_balances_and_open_orders(
     rpc_limiter: &RateLimiter<NotKeyed, InMemoryState, DefaultClock>,
     ctx: &ConnectionCtx,
     trader: Pubkey,
+    prioritization_fee_percentile: f64,
 ) -> Result<()> {
     let mut tokens = FxHashSet::default();
     let mut balances: HashMap<String, Decimal> = HashMap::new();
     for (_, mi) in &ctx.market_info {
         // poll the prio fee while we're here
         rpc_limiter.until_ready().await;
-        let mut recent_fees = vec![];
+        let mut recent_fees = Histogram::<u64>::new(3)?;
         let rpfs = sdk_client.client.get_recent_prioritization_fees(&[mi.pubkey]).await?;
         for rpf in &rpfs {
             if rpf.prioritization_fee != 0 {
-                recent_fees.push(rpf.prioritization_fee);
+                if let Err(e) = recent_fees.record(rpf.prioritization_fee) {
+                    error!("recording prioritization fee: {e}");
+                }
             }
         }
         let median_fee = if recent_fees.is_empty() {
             0u64
         } else {
-            recent_fees.sort();
-            recent_fees[recent_fees.len() / 2]
+            recent_fees.value_at_percentile(prioritization_fee_percentile)
         };
         debug!("median prioritization fee for {}: {}", mi.pubkey, median_fee);
         mi.prioritization_fee.store(median_fee, Ordering::Relaxed);
