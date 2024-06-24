@@ -5,7 +5,7 @@ version = "0.1.0"
 
 [dependencies]
 anyhow = "1"
-api = { package = "architect-api", path = "../demon/api", features = ["clap"] }
+api = { package = "architect-api", features = ["clap"] }
 bytemuck = "1"
 bytes = "1"
 chrono = "0.4"
