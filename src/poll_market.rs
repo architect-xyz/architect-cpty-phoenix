@@ -1,5 +1,7 @@
 use crate::ConnectionCtx;
 use anyhow::{Context, Result};
+use api::{cpty::generic_external::ExternalBookSnapshot, DirPair};
+use chrono::Utc;
 use fxhash::FxHashSet;
 use governor::{
     clock::DefaultClock,
@@ -7,9 +9,12 @@ use governor::{
     RateLimiter,
 };
 use hdrhistogram::Histogram;
+use itertools::Itertools;
 use log::{debug, error, warn};
+use num_traits::FromPrimitive;
 use phoenix::quantities::WrapperU64;
 use phoenix_sdk::sdk_client::SDKClient;
+use phoenix_sdk_core::orderbook::{OrderbookKey, OrderbookValue};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use solana_sdk::pubkey::Pubkey;
@@ -18,7 +23,7 @@ use std::{
     sync::{atomic::Ordering, Arc},
 };
 
-pub async fn poll_balances_and_open_orders(
+pub async fn poll_market(
     sdk_client: Arc<SDKClient>,
     rpc_limiter: &RateLimiter<NotKeyed, InMemoryState, DefaultClock>,
     ctx: &ConnectionCtx,
@@ -50,6 +55,50 @@ pub async fn poll_balances_and_open_orders(
         tokens.insert(mi.quote.clone());
         rpc_limiter.until_ready().await;
         let state = sdk_client.get_market_state(&mi.pubkey).await?;
+        let convert_price_size = |(price, size): (f64, f64)| match (
+            Decimal::from_f64(price),
+            Decimal::from_f64(size),
+        ) {
+            (Some(price), Some(size)) => Some((price, size)),
+            _ => {
+                error!("unrepresentable price or size while parsing book");
+                None
+            }
+        };
+        let bids: Vec<(Decimal, Decimal)> = state
+            .orderbook
+            .get_bids()
+            .iter()
+            .rev()
+            .chunk_by(|(k, _)| {
+                k.price() * state.orderbook.quote_units_per_raw_base_unit_per_tick
+            })
+            .into_iter()
+            .filter_map(|(p, g)| {
+                let size = g.map(|(_, o)| o.size()).sum::<f64>();
+                convert_price_size((p, size))
+            })
+            .collect();
+        let asks: Vec<(Decimal, Decimal)> = state
+            .orderbook
+            .get_asks()
+            .iter()
+            .chunk_by(|(k, _)| {
+                k.price() * state.orderbook.quote_units_per_raw_base_unit_per_tick
+            })
+            .into_iter()
+            .filter_map(|(p, g)| {
+                let size = g.map(|(_, o)| o.size()).sum::<f64>();
+                convert_price_size((p, size))
+            })
+            .collect();
+        {
+            let mut book_snapshot = mi.book_snapshot.lock().unwrap();
+            *book_snapshot = Some(ExternalBookSnapshot {
+                book: DirPair { buy: Arc::new(bids), sell: Arc::new(asks) },
+                timestamp: Utc::now(),
+            });
+        }
         if let Some(tstate) = state.traders.get(&trader) {
             // CR alee: support locked balances in external cpty protocol;
             // not sure if its per market or they share the same vaults.

@@ -3,7 +3,7 @@ use api::{
     cpty::generic_external::*,
     orderflow::{Ack, FillId, FillKind, OrderType, Out, TimeInForce},
     symbology::VenueId,
-    Dir, OrderId,
+    Dir, HumanDuration, OrderId,
 };
 use architect_cpty_phoenix::*;
 use bytes::{BufMut, BytesMut};
@@ -76,6 +76,7 @@ struct Config {
     rpc_rate_limit_per_sec: NonZeroU32,
     prioritization_fee_percentile: f64,
     venue: String,
+    poll_markets_every: HumanDuration,
     markets: Vec<String>,
     tokens: BTreeMap<String, TokenConfig>,
 }
@@ -182,6 +183,7 @@ async fn run(
                 quote,
                 seated: Arc::new(AtomicBool::new(false)),
                 open_oids: Mutex::new(Default::default()),
+                book_snapshot: Mutex::new(None),
             },
         );
     }
@@ -192,7 +194,7 @@ async fn run(
         open_cl_oids: Mutex::new(Default::default()),
     });
     // initial balances and open orders sweep
-    balances_and_open_orders::poll_balances_and_open_orders(
+    poll_market::poll_market(
         sdk_client.clone(),
         &rpc_limiter,
         &ctx,
@@ -206,10 +208,11 @@ async fn run(
         let ctx = ctx.clone();
         tokio::task::spawn(async move {
             loop {
-                if let Err(e) = poll_balances_and_open_orders_task(
+                if let Err(e) = poll_markets_task(
                     sdk_client.clone(),
                     rpc_limiter.clone(),
                     &ctx,
+                    *config.poll_markets_every,
                     trader,
                     config.prioritization_fee_percentile,
                 )
@@ -492,30 +495,65 @@ async fn handle_message(
                 error!("unknown order id or osn for: {}", c.order_id);
             }
         }
+        ExternalCptyProtocol::GetBookSnapshot { id, market } => {
+            let market_info = match ctx.market_info.get(&market) {
+                Some(entry) => entry,
+                None => {
+                    let reply = ExternalCptyProtocol::BookSnapshot {
+                        id,
+                        result: None,
+                        error: Some("market not found".to_string()),
+                    };
+                    let reply = serde_json::to_string(&reply)?;
+                    ws.send(Message::Text(reply)).await?;
+                    return Ok(());
+                }
+            };
+            let reply = {
+                let snap = market_info.book_snapshot.lock().unwrap();
+                if let Some(snap) = &*snap {
+                    ExternalCptyProtocol::BookSnapshot {
+                        id,
+                        result: Some(snap.clone()),
+                        error: None,
+                    }
+                } else {
+                    ExternalCptyProtocol::BookSnapshot {
+                        id,
+                        result: None,
+                        error: Some("no book snapshot yet".to_string()),
+                    }
+                }
+            };
+            let reply = serde_json::to_string(&reply)?;
+            ws.send(Message::Text(reply)).await?;
+        }
         ExternalCptyProtocol::Symbology(..)
         | ExternalCptyProtocol::OpenOrders { .. }
         | ExternalCptyProtocol::Balances { .. }
         | ExternalCptyProtocol::Reject(..)
         | ExternalCptyProtocol::Ack(..)
         | ExternalCptyProtocol::Fill(..)
-        | ExternalCptyProtocol::Out(..) => {
+        | ExternalCptyProtocol::Out(..)
+        | ExternalCptyProtocol::BookSnapshot { .. } => {
             // not expecting the recv this
         }
     }
     Ok(())
 }
 
-async fn poll_balances_and_open_orders_task(
+async fn poll_markets_task(
     sdk_client: Arc<SDKClient>,
     rpc_limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
     ctx: &ConnectionCtx,
+    interval: chrono::Duration,
     trader: Pubkey,
     prioritization_fee_percentile: f64,
 ) -> Result<()> {
-    let mut min_interval = tokio::time::interval(std::time::Duration::from_secs(3));
+    let mut min_interval = tokio::time::interval(interval.to_std()?);
     min_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
-        if let Err(e) = balances_and_open_orders::poll_balances_and_open_orders(
+        if let Err(e) = poll_market::poll_market(
             sdk_client.clone(),
             &rpc_limiter,
             ctx,

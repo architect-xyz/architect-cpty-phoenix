@@ -1,11 +1,11 @@
 [package]
 edition = "2021"
 name = "architect-cpty-phoenix"
-version = "0.1.0"
+version = "0.2.0"
 
 [dependencies]
 anyhow = "1"
-api = { package = "architect-api", features = ["clap"] }
+api = { package = "architect-api", version = "0.4.1", features = ["clap"] }
 bytemuck = "1"
 bytes = "1"
 chrono = "0.4"
@@ -18,6 +18,7 @@ fxhash = "0.2.1"
 generic-token-faucet = "0.1.2"
 governor = "0.6.3"
 hdrhistogram = "7.5.4"
+itertools = "0.13.0"
 log = { version = "0.4", features = [] }
 nonzero_ext = "0.3.0"
 num-traits = "0.2"

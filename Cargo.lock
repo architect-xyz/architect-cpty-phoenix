@@ -374,9 +374,9 @@ dependencies = [
 
 [[package]]
 name = "architect-api"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "881abde69ec1caff12fed3dc44607c040b5454a3f2a0a67be197396ce0db2de2"
+checksum = "1350f3a8971582d330ee542589c4449e2b137d9dd432471c3d7c60104db4ba07"
 dependencies = [
  "anyhow",
  "architect-derive",
@@ -400,6 +400,7 @@ dependencies = [
  "parking_lot",
  "pest",
  "pest_derive",
+ "postgres-types",
  "rand 0.8.5",
  "rust_decimal",
  "rust_decimal_macros",
@@ -416,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "architect-cpty-phoenix"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "architect-api",
@@ -432,6 +433,7 @@ dependencies = [
  "generic-token-faucet",
  "governor",
  "hdrhistogram",
+ "itertools 0.13.0",
  "log",
  "nonzero_ext",
  "num-traits",
@@ -2890,6 +2892,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3928,6 +3939,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7170ef9988bc169ba16dd36a7fa041e5c4cbeb6a35b76d4c03daded371eae7c0"
 
 [[package]]
+name = "postgres-derive"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83145eba741b050ef981a9a1838c843fa7665e154383325aa8b440ae703180a2"
+dependencies = [
+ "heck 0.4.1",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.66",
+]
+
+[[package]]
 name = "postgres-protocol"
 version = "0.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3954,6 +3977,7 @@ dependencies = [
  "bytes",
  "chrono",
  "fallible-iterator",
+ "postgres-derive",
  "postgres-protocol",
  "serde",
  "serde_json",

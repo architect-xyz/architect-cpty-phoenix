@@ -1,3 +1,4 @@
+use api::cpty::generic_external::ExternalBookSnapshot;
 use phoenix_sdk_core::sdk_client_core::MarketMetadata;
 use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
@@ -9,7 +10,7 @@ use std::{
     },
 };
 
-pub mod balances_and_open_orders;
+pub mod poll_market;
 pub mod utils;
 
 #[derive(Debug)]
@@ -33,6 +34,7 @@ pub struct MarketInfo {
     // open order sequence numbers => (client_order_id, price_in_ticks)
     // TODO: persist these across restarts
     pub open_oids: Mutex<HashMap<u64, (u128, u64)>>,
+    pub book_snapshot: Mutex<Option<ExternalBookSnapshot>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
