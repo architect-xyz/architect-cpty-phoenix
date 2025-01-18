@@ -252,12 +252,16 @@ async fn run(
     let listener = TcpListener::bind(&bind_addr).await?;
     info!("listening on {bind_addr}...");
     while let Ok((stream, _)) = listener.accept().await {
-        tokio::spawn(accept_connection(
-            stream,
-            ctx.clone(),
-            sdk_client.clone(),
-            bcast_tx.subscribe(),
-        ));
+        let ctx = ctx.clone();
+        let sdk_client = sdk_client.clone();
+        let bcast_rx = bcast_tx.subscribe();
+        tokio::spawn(async move {
+            if let Err(e) =
+                accept_connection(stream, ctx.clone(), sdk_client.clone(), bcast_rx).await
+            {
+                error!("connection: {e:?}");
+            };
+        });
     }
     Ok(())
 }
