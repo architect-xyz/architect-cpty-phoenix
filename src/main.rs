@@ -3,7 +3,7 @@ use api::{
     cpty::generic_external::*,
     orderflow::{Ack, FillId, FillKind, OrderType, Out, TimeInForce},
     symbology::VenueId,
-    Dir, HumanDuration, OrderId,
+    Dir, HumanDuration,
 };
 use architect_cpty_phoenix::*;
 use bytes::{BufMut, BytesMut};
@@ -192,6 +192,7 @@ async fn run(
         market_info,
         balances: Mutex::new(Default::default()),
         open_cl_oids: Mutex::new(Default::default()),
+        cloids: Mutex::new(Default::default()),
     });
     // initial balances and open orders sweep
     poll_market::poll_market(
@@ -328,11 +329,11 @@ async fn handle_message(
         ExternalCptyProtocol::GetOpenOrders => {
             let open_oids = {
                 let open_cl_oids = ctx.open_cl_oids.lock().unwrap();
+                let open_cl_oids: Vec<u128> = open_cl_oids.keys().cloned().collect();
+                let cloids = ctx.cloids.lock().unwrap();
                 open_cl_oids
-                    .keys()
-                    .map(|xoid| {
-                        OrderId::new_unchecked((*xoid | 0xFFFF_FFFF_FFFF_FFFF) as u64)
-                    })
+                    .iter()
+                    .filter_map(|cloid| cloids.get(cloid).copied())
                     .collect()
             };
             let reply =
@@ -391,7 +392,7 @@ async fn handle_message(
             // upper 64 bits is a random seed to be able to identify it
             // on the stream later.
             let oid_seed: u64 = rand::thread_rng().gen();
-            let client_oid = ((oid_seed as u128) << 64) | (o.id.to_u64() as u128);
+            let client_oid = ((oid_seed as u128) << 64) | (o.id.seqno as u128);
             let ix = match o.time_in_force {
                 TimeInForce::GoodTilCancel => {
                     if params.post_only {
@@ -456,16 +457,24 @@ async fn handle_message(
         ExternalCptyProtocol::Cancel(c) => {
             // find the cloid and osn corresponding to the architect orderid
             if let Some((cl_oid, Some(osn))) = {
-                let ctx_open_cl_oids = ctx.open_cl_oids.lock().unwrap();
-                ctx_open_cl_oids.iter().find_map(|(cl_oid, osn)| {
-                    let aoid =
-                        OrderId::new_unchecked((*cl_oid & 0xFFFF_FFFF_FFFF_FFFF) as u64);
-                    if aoid == c.order_id {
-                        Some((*cl_oid, *osn))
+                let ctx_cloids = ctx.cloids.lock().unwrap();
+                let cloid = ctx_cloids.iter().find_map(|(cl_oid, aoid)| {
+                    if *aoid == c.order_id {
+                        Some(*cl_oid)
                     } else {
                         None
                     }
-                })
+                });
+                if let Some(cloid) = cloid {
+                    let ctx_open_cl_oids = ctx.open_cl_oids.lock().unwrap();
+                    if let Some(osn) = ctx_open_cl_oids.get(&cloid).copied() {
+                        Some((cloid, osn))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             } {
                 // find the correspondent market
                 let mut res = None;
@@ -713,11 +722,18 @@ async fn poll_transactions(
                                 if let Some((cl_oid, _)) =
                                     oo.get(&f.order_sequence_number)
                                 {
-                                    let oid = OrderId::new_unchecked(
-                                        (*cl_oid & 0xFFFF_FFFF_FFFF_FFFF) as u64,
-                                    );
+                                    let oid = if let Some(oid) = {
+                                        let ctx_cloids = ctx.cloids.lock().unwrap();
+                                        ctx_cloids.get(cl_oid).copied()
+                                    } {
+                                        oid
+                                    } else {
+                                        error!("unknown cl_oid: {}", cl_oid);
+                                        continue;
+                                    };
                                     let mut fill_discriminator = BytesMut::new();
-                                    fill_discriminator.put_u64(oid.to_u64());
+                                    fill_discriminator.put_u128(oid.seqid.as_u128());
+                                    fill_discriminator.put_u64(oid.seqno);
                                     fill_discriminator.put_u64(event.sequence_number);
                                     let fill_id = FillId::from_id(
                                         venue,
@@ -784,9 +800,15 @@ async fn poll_transactions(
                                     p.order_sequence_number,
                                     (p.client_order_id, p.price_in_ticks),
                                 );
-                                let oid = OrderId::new_unchecked(
-                                    (p.client_order_id & 0xFFFF_FFFF_FFFF_FFFF) as u64,
-                                );
+                                let oid = if let Some(oid) = {
+                                    let ctx_cloids = ctx.cloids.lock().unwrap();
+                                    ctx_cloids.get(&p.client_order_id).copied()
+                                } {
+                                    oid
+                                } else {
+                                    error!("unknown cl_oid: {}", p.client_order_id);
+                                    continue;
+                                };
                                 info!(
                                     "architect order {} acked with osn #{}",
                                     oid, p.order_sequence_number
@@ -812,9 +834,15 @@ async fn poll_transactions(
                                 let mut ocos = ctx.open_cl_oids.lock().unwrap();
                                 ocos.remove(&cl_oid);
                                 oo.remove(&e.order_sequence_number);
-                                let oid = OrderId::new_unchecked(
-                                    (cl_oid & 0xFFFF_FFFF_FFFF_FFFF) as u64,
-                                );
+                                let oid = if let Some(oid) = {
+                                    let ctx_cloids = ctx.cloids.lock().unwrap();
+                                    ctx_cloids.get(&cl_oid).copied()
+                                } {
+                                    oid
+                                } else {
+                                    error!("unknown cl_oid: {}", cl_oid);
+                                    continue;
+                                };
                                 info!("architect order {} evicted out", oid);
                                 bcast_tx
                                     .send(ExternalCptyProtocol::Out(Out {
@@ -832,9 +860,15 @@ async fn poll_transactions(
                                     let mut ocos = ctx.open_cl_oids.lock().unwrap();
                                     ocos.remove(&cl_oid);
                                     oo.remove(&r.order_sequence_number);
-                                    let oid = OrderId::new_unchecked(
-                                        (cl_oid & 0xFFFF_FFFF_FFFF_FFFF) as u64,
-                                    );
+                                    let oid = if let Some(oid) = {
+                                        let ctx_cloids = ctx.cloids.lock().unwrap();
+                                        ctx_cloids.get(&cl_oid).copied()
+                                    } {
+                                        oid
+                                    } else {
+                                        error!("unknown cl_oid: {}", cl_oid);
+                                        continue;
+                                    };
                                     info!("architect order {} reduced out", oid);
                                     bcast_tx
                                         .send(ExternalCptyProtocol::Out(Out {

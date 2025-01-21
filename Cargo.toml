@@ -5,7 +5,7 @@ version = "0.2.0"
 
 [dependencies]
 anyhow = "1"
-api = { package = "architect-api", version = "0.4.1", features = ["clap"] }
+api = { package = "architect-api", version = "=2.1.3", features = ["clap"] }
 bytemuck = "1"
 bytes = "1"
 chrono = "0.4"
@@ -25,7 +25,9 @@ num-traits = "0.2"
 phoenix-common = { version = "0.2.1", features = ["no-entrypoint"] }
 phoenix-sdk = "0.7.0"
 phoenix-sdk-core = "0.7.0"
-phoenix-seat-manager-common = { version = "0.1.1", features = ["no-entrypoint"] }
+phoenix-seat-manager-common = { version = "0.1.1", features = [
+    "no-entrypoint",
+] }
 rand = "0.8"
 rust_decimal = "1"
 rust_decimal_macros = "1"

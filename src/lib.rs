@@ -1,4 +1,4 @@
-use api::cpty::generic_external::ExternalBookSnapshot;
+use api::{cpty::generic_external::ExternalBookSnapshot, OrderId};
 use phoenix_sdk_core::sdk_client_core::MarketMetadata;
 use rust_decimal::Decimal;
 use solana_sdk::pubkey::Pubkey;
@@ -19,6 +19,8 @@ pub struct ConnectionCtx {
     pub balances: Mutex<HashMap<String, Decimal>>,
     // client_order_id => order sequence number
     pub open_cl_oids: Mutex<HashMap<u128, Option<u64>>>,
+    // client_order_id => order id
+    pub cloids: Mutex<HashMap<u128, OrderId>>,
 }
 
 #[derive(Debug)]
