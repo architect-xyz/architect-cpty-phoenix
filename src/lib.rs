@@ -26,6 +26,8 @@ pub struct ConnectionCtx {
 #[derive(Debug)]
 pub struct MarketInfo {
     pub pubkey: Pubkey,
+    pub tick_size: Decimal,
+    pub step_size: Decimal,
     // last recommended priorization fee for this market in micro_lamports
     pub prioritization_fee: Arc<AtomicU64>,
     pub metadata: MarketMetadata,

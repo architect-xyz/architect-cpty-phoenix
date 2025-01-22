@@ -28,6 +28,7 @@ use phoenix_sdk_core::market_event::MarketEventDetails;
 use rand::Rng;
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use serde_json::json;
 use solana_client::{
     nonblocking::rpc_client::RpcClient,
     rpc_client::GetConfirmedSignaturesForAddress2Config,
@@ -77,7 +78,7 @@ struct Config {
     prioritization_fee_percentile: f64,
     venue: String,
     poll_markets_every: HumanDuration,
-    markets: Vec<String>,
+    markets: BTreeMap<String, MarketConfig>, // pubkey => MarketConfig
     tokens: BTreeMap<String, TokenConfig>,
 }
 
@@ -87,12 +88,21 @@ struct TokenConfig {
     decimals: u8,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct MarketConfig {
+    tick_size: Decimal,
+    step_size: Decimal,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
     let config: Config = serde_json::from_str(&std::fs::read_to_string(&args.config)?)?;
-    let markets =
-        config.markets.iter().map(|m| m.parse()).collect::<Result<Vec<Pubkey>, _>>()?;
+    let markets = config
+        .markets
+        .iter()
+        .map(|(k, v)| (k.parse().unwrap(), v.clone()))
+        .collect::<BTreeMap<Pubkey, MarketConfig>>();
     let payer = utils::get_payer_keypair();
     env_logger::init();
     let solana_rpc_client = RpcClient::new_with_commitment(
@@ -103,7 +113,8 @@ async fn main() -> Result<()> {
     // let sdk_client = SDKClient::new_from_ellipsis_client(client).await?;
     let sdk_client = SDKClient::new_from_ellipsis_client_with_all_markets(client).await?;
     match args.cmd {
-        Command::DevnetAirdrop => devnet_airdrop(sdk_client, payer, &markets[0]).await?,
+        Command::DevnetAirdrop => todo!(),
+        // Command::DevnetAirdrop => devnet_airdrop(sdk_client, payer, &markets[0]).await?,
         Command::Run => run(config, sdk_client, payer.pubkey(), markets).await?,
     }
     Ok(())
@@ -151,14 +162,14 @@ async fn run(
     config: Config,
     sdk_client: SDKClient,
     trader: Pubkey,
-    markets: Vec<Pubkey>,
+    markets: BTreeMap<Pubkey, MarketConfig>,
 ) -> Result<()> {
     let sdk_client = Arc::new(sdk_client);
     let rpc_limiter =
         Arc::new(RateLimiter::direct(Quota::per_second(config.rpc_rate_limit_per_sec)));
     let token_info: HashMap<Pubkey, TokenInfo> = HashMap::new();
     let mut market_info: HashMap<String, MarketInfo> = HashMap::new();
-    for market in &markets {
+    for (market, market_config) in markets.iter() {
         debug!("loading market metadata for {}", market);
         rpc_limiter.until_ready().await;
         let metadata = sdk_client.get_market_metadata(&market).await?;
@@ -177,6 +188,8 @@ async fn run(
             market_name,
             MarketInfo {
                 pubkey: *market,
+                tick_size: market_config.tick_size,
+                step_size: market_config.step_size,
                 prioritization_fee: Arc::new(AtomicU64::new(0)),
                 metadata,
                 base,
@@ -320,9 +333,21 @@ async fn handle_message(
     match msg {
         ExternalCptyProtocol::GetSymbology => {
             // reply with all known market names
-            let reply = ExternalCptyProtocol::Symbology(ExternalSymbology {
-                markets: ctx.market_info.keys().cloned().collect(),
+            let mut json_markets: Vec<serde_json::Value> = vec![];
+            for (market_name, market_info) in ctx.market_info.iter() {
+                json_markets.push(json!({
+                    "name": market_name,
+                    "tick_size": market_info.tick_size,
+                    "step_size": market_info.step_size,
+                }));
+            }
+            let reply = json!({
+                "type": "Symbology",
+                "markets": json_markets
             });
+            // let reply = ExternalCptyProtocol::Symbology(ExternalSymbology {
+            //     markets: ctx.market_info.keys().cloned().collect(),
+            // });
             let reply = serde_json::to_string(&reply)?;
             ws.send(Message::Text(reply)).await?;
         }
